@@ -78,7 +78,7 @@ jobs:
         working-directory: kernel_workspace
         id: build
         run: | 
-         curl -Ls https://raw.githubusercontent.com/mcxiaochenn/Action_OKI_KernelSU_SUSFS/refs/heads/main/build_shell/build_mksu_sm8650.sh -o build_mksu_sm8650.sh
+         curl -Ls https://raw.githubusercontent.com/dgscyg/Action_OKI_KernelSU_SUSFS/refs/heads/main/build_shell/build_mksu_sm8650.sh -o build_mksu_sm8650.sh
          chmod +x build_mksu_sm8650.sh
          ./build_mksu_sm8650.sh ${{ steps.map_manifest.outputs.mapped_manifest }} \
                                 ${{ github.event.inputs.enable_lto }} \
