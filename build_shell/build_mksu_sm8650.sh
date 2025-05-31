@@ -27,7 +27,7 @@ SUSFS_VERSION="1.5.7"
 OLD_DIR="$(pwd)"
 KERNEL_WORKSPACE="$OLD_DIR/kernel_platform"
 
-# 配置编译器自然环境
+# 配置编译器环境
 export CC="clang"
 export CLANG_TRIPLE="aarch64-linux-gnu-"
 export LDFLAGS="-fuse-ld=lld"
@@ -47,36 +47,42 @@ sed -i 's/ -dirty//g' "$KERNEL_WORKSPACE/build/kernel/kleaf/workspace_status_sta
 cd "$KERNEL_WORKSPACE" || exit 1
 find . -type d > "$OLD_DIR/kernel_directory_structure.txt"
 
-# 设置 KernelSU
+# 下载依赖
+cd "$OLD_DIR" || exit 1
+git clone https://gitlab.com/simonpunk/susfs4ksu.git -b "gki-${ANDROID_VERSION}-${KERNEL_VERSION}" --depth 1
+git clone https://github.com/WildPlusKernel/kernel_patches.git --depth 1
+
+# 设置 KernelSU (MKSU 变体)
 cd "$KERNEL_WORKSPACE" || exit 1
-curl -LSs "https://raw.githubusercontent.com/5ec1cff/KernelSU/refs/heads/main/kernel/setup.sh" | bash -
+curl -LSs "https://raw.githubusercontent.com/5ec1cff/KernelSU/main/kernel/setup.sh" | bash -s main
 cd KernelSU || exit 1
-git revert -m 1 "$(git log --grep="remove devpts hook" --pretty=format:"%H")" -n
 KSU_VERSION=$(expr "$(git rev-list --count HEAD)" + 10200)
 sed -i "s/DKSU_VERSION=16/DKSU_VERSION=${KSU_VERSION}/" kernel/Makefile
 
-# 设置 susfs
-cd "$OLD_DIR" || exit 1
-git clone https://gitlab.com/simonpunk/susfs4ksu.git -b "gki-${ANDROID_VERSION}-${KERNEL_VERSION}" --depth 1
-git clone https://github.com/TanakaLun/kernel_patches4mksu --depth 1
+# 修复 KSU_GIT_VERSION 警告
+KSU_GIT_VERSION=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
+sed -i "s/KSU_GIT_VERSION not defined.*/KSU_GIT_VERSION=\"$KSU_GIT_VERSION\"/" kernel/Makefile
+
+# 复制 SUSFS 文件到内核源码
 cd "$KERNEL_WORKSPACE" || exit 1
-cp ../susfs4ksu/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch ./KernelSU/
-cp ../kernel_patches4mksu/mksu/mksu_susfs.patch ./KernelSU/
-cp ../kernel_patches4mksu/mksu/fix.patch ./KernelSU/
-cp ../kernel_patches4mksu/mksu/vfs_fix.patch ./KernelSU/
 cp ../susfs4ksu/kernel_patches/50_add_susfs_in_gki-${ANDROID_VERSION}-${KERNEL_VERSION}.patch ./common/
 cp -r ../susfs4ksu/kernel_patches/fs/* ./common/fs/
 cp -r ../susfs4ksu/kernel_patches/include/linux/* ./common/include/linux/
 
-# 应用补丁
+# 应用 MKSU 专用的 SUSFS 补丁
 cd KernelSU || exit 1
-patch -p1 --forward < 10_enable_susfs_for_ksu.patch || true
-patch -p1 --forward < mksu_susfs.patch || true
-patch -p1 --forward < fix.patch || true
-patch -p1 --forward < vfs_fix.patch || true
-cd ../common || exit 1
-patch -s -p1 < 50_add_susfs_in_gki-${ANDROID_VERSION}-${KERNEL_VERSION}.patch || true
+cp ../../kernel_patches/next/0001-kernel-patch-susfs-v1.5.7-to-KernelSU-Next-v1.0.7.patch ./
+patch -p1 --forward --fuzz=3 < 0001-kernel-patch-susfs-v1.5.7-to-KernelSU-Next-v1.0.7.patch || true
 
+# 应用 hide_stuff 补丁
+cd "$KERNEL_WORKSPACE/common" || exit 1
+cp ../../kernel_patches/69_hide_stuff.patch ./
+patch -p1 -F 3 < 69_hide_stuff.patch || true
+
+# 应用 SUSFS 补丁到内核
+patch -p1 --fuzz=3 < 50_add_susfs_in_gki-${ANDROID_VERSION}-${KERNEL_VERSION}.patch || true
+
+# 应用 LZ4 和 ZSTD 补丁
 curl -o 001-lz4.patch https://raw.githubusercontent.com/ferstar/kernel_manifest/realme/sm8650/patches/001-lz4.patch
 patch -p1 < 001-lz4.patch || true
 curl -o 002-zstd.patch https://raw.githubusercontent.com/ferstar/kernel_manifest/realme/sm8650/patches/002-zstd.patch
@@ -84,15 +90,65 @@ patch -p1 < 002-zstd.patch || true
 
 cd "$KERNEL_WORKSPACE" || exit 1
 
-# 这一步用于修复lz4与zstd 所导致的WiFi 5G失效等一系列问题
-rm common/android/abi_gki_protected_exports_*     
+# 修复 lz4 与 zstd 所导致的问题
+rm -f common/android/abi_gki_protected_exports_*
 
+# 添加基本内核配置
 echo "CONFIG_TMPFS_XATTR=y" >> "$KERNEL_WORKSPACE/common/arch/arm64/configs/gki_defconfig"
 echo "CONFIG_TMPFS_POSIX_ACL=y" >> "$KERNEL_WORKSPACE/common/arch/arm64/configs/gki_defconfig"
 
+# 添加 KSU 配置
+echo "CONFIG_KSU=y" >> "$KERNEL_WORKSPACE/common/arch/arm64/configs/gki_defconfig"
+
+# 添加 SUSFS 配置
+echo "CONFIG_KSU_SUSFS=y" >> "$KERNEL_WORKSPACE/common/arch/arm64/configs/gki_defconfig"
+echo "CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=y" >> "$KERNEL_WORKSPACE/common/arch/arm64/configs/gki_defconfig"
+echo "CONFIG_KSU_SUSFS_SUS_PATH=y" >> "$KERNEL_WORKSPACE/common/arch/arm64/configs/gki_defconfig"
+echo "CONFIG_KSU_SUSFS_SUS_MOUNT=y" >> "$KERNEL_WORKSPACE/common/arch/arm64/configs/gki_defconfig"
+echo "CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT=y" >> "$KERNEL_WORKSPACE/common/arch/arm64/configs/gki_defconfig"
+echo "CONFIG_KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT=y" >> "$KERNEL_WORKSPACE/common/arch/arm64/configs/gki_defconfig"
+echo "CONFIG_KSU_SUSFS_SUS_KSTAT=y" >> "$KERNEL_WORKSPACE/common/arch/arm64/configs/gki_defconfig"
+echo "CONFIG_KSU_SUSFS_SUS_OVERLAYFS=n" >> "$KERNEL_WORKSPACE/common/arch/arm64/configs/gki_defconfig"
+echo "CONFIG_KSU_SUSFS_TRY_UMOUNT=y" >> "$KERNEL_WORKSPACE/common/arch/arm64/configs/gki_defconfig"
+echo "CONFIG_KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT=y" >> "$KERNEL_WORKSPACE/common/arch/arm64/configs/gki_defconfig"
+echo "CONFIG_KSU_SUSFS_SPOOF_UNAME=y" >> "$KERNEL_WORKSPACE/common/arch/arm64/configs/gki_defconfig"
+echo "CONFIG_KSU_SUSFS_ENABLE_LOG=y" >> "$KERNEL_WORKSPACE/common/arch/arm64/configs/gki_defconfig"
+echo "CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y" >> "$KERNEL_WORKSPACE/common/arch/arm64/configs/gki_defconfig"
+echo "CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y" >> "$KERNEL_WORKSPACE/common/arch/arm64/configs/gki_defconfig"
+echo "CONFIG_KSU_SUSFS_OPEN_REDIRECT=y" >> "$KERNEL_WORKSPACE/common/arch/arm64/configs/gki_defconfig"
+echo "CONFIG_KSU_SUSFS_SUS_SU=y" >> "$KERNEL_WORKSPACE/common/arch/arm64/configs/gki_defconfig"
+
+# 添加网络配置
+echo "CONFIG_IP_NF_TARGET_TTL=y" >> "$KERNEL_WORKSPACE/common/arch/arm64/configs/gki_defconfig"
+echo "CONFIG_IP6_NF_TARGET_HL=y" >> "$KERNEL_WORKSPACE/common/arch/arm64/configs/gki_defconfig"
+echo "CONFIG_IP6_NF_MATCH_HL=y" >> "$KERNEL_WORKSPACE/common/arch/arm64/configs/gki_defconfig"
+
+# 添加 BBR 配置
+echo "CONFIG_TCP_CONG_ADVANCED=y" >> "$KERNEL_WORKSPACE/common/arch/arm64/configs/gki_defconfig" 
+echo "CONFIG_TCP_CONG_BBR=y" >> "$KERNEL_WORKSPACE/common/arch/arm64/configs/gki_defconfig"
+echo "CONFIG_NET_SCH_FQ=y" >> "$KERNEL_WORKSPACE/common/arch/arm64/configs/gki_defconfig"
+echo "CONFIG_TCP_CONG_BIC=n" >> "$KERNEL_WORKSPACE/common/arch/arm64/configs/gki_defconfig"
+echo "CONFIG_TCP_CONG_WESTWOOD=n" >> "$KERNEL_WORKSPACE/common/arch/arm64/configs/gki_defconfig"
+echo "CONFIG_TCP_CONG_HTCP=n" >> "$KERNEL_WORKSPACE/common/arch/arm64/configs/gki_defconfig"
+
+# 添加安全相关配置
+echo "CONFIG_SECURITY_SELINUX_DISABLE=y" >> "$KERNEL_WORKSPACE/common/arch/arm64/configs/gki_defconfig"
+echo "CONFIG_KPROBES=y" >> "$KERNEL_WORKSPACE/common/arch/arm64/configs/gki_defconfig"
+echo "CONFIG_HAVE_KPROBES=y" >> "$KERNEL_WORKSPACE/common/arch/arm64/configs/gki_defconfig"
+echo "CONFIG_KPROBE_EVENTS=y" >> "$KERNEL_WORKSPACE/common/arch/arm64/configs/gki_defconfig"
+
+# 修改内核名称
+perl -pi -e 's{UTS_VERSION="\$\(echo \$UTS_VERSION \$CONFIG_FLAGS \$TIMESTAMP \| cut -b -\$UTS_LEN\)"}{UTS_VERSION="#1 SMP PREEMPT Fri May 31 13:26:56 UTC 2025 by dgscyg"}' ./common/scripts/mkcompile_h
+sed -i '$s|echo "\$res"|echo "\$res-MKSU"|' ./common/scripts/setlocalversion
+sed -i '/^[[:space:]]*"protected_exports_list"[[:space:]]*:[[:space:]]*"android\/abi_gki_protected_exports_aarch64",$/d' ./common/BUILD.bazel
+sed -i "/stable_scmversion_cmd/s/-maybe-dirty//g" ./build/kernel/kleaf/impl/stamp.bzl
+sed -E -i '/^CONFIG_LOCALVERSION=/ s/(.*)"$/\1-MKSU"/' ./common/arch/arm64/configs/gki_defconfig
+
+# 禁用 check_defconfig
 sed -i 's/check_defconfig//' "$KERNEL_WORKSPACE/common/build.config.gki"
 
 export OPLUS_FEATURES="OPLUS_FEATURE_BSP_DRV_INJECT_TEST=1"
+
 # 构建内核
 cd "$OLD_DIR" || exit 1
 ./kernel_platform/build_with_bazel.py -t "${CPUD}" gki \
@@ -102,7 +158,6 @@ cd "$OLD_DIR" || exit 1
 
 # 获取内核版本
 KERNEL_VERSION=$(cat "$KERNEL_WORKSPACE/out/msm-kernel-${CPUD}-gki/dist/version.txt" 2>/dev/null || echo "6.1")
-
 
 # 输出变量到 GitHub Actions
 echo "kernel_version=$KERNEL_VERSION" >> "$GITHUB_OUTPUT"
