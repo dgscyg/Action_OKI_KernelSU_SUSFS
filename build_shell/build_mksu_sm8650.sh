@@ -59,9 +59,12 @@ cd KernelSU || exit 1
 KSU_VERSION=$(expr "$(git rev-list --count HEAD)" + 10200)
 sed -i "s/DKSU_VERSION=16/DKSU_VERSION=${KSU_VERSION}/" kernel/Makefile
 
-# 修复 KSU_GIT_VERSION 警告
+# 修复 KSU_GIT_VERSION 警告 - 使用正确的语法
 KSU_GIT_VERSION=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
-sed -i "s/KSU_GIT_VERSION not defined.*/KSU_GIT_VERSION=\"$KSU_GIT_VERSION\"/" kernel/Makefile
+# 这里是关键修复 - 确保Makefile中的warning函数调用语法正确
+sed -i 's/$(warning "KSU_GIT_VERSION not defined.*)/$(warning "KSU_GIT_VERSION not defined!")/' kernel/Makefile
+# 然后添加正确的KSU_GIT_VERSION定义
+echo "KSU_GIT_VERSION := $KSU_GIT_VERSION" >> kernel/Makefile
 
 # 复制 SUSFS 文件到内核源码
 cd "$KERNEL_WORKSPACE" || exit 1
@@ -88,6 +91,46 @@ patch -p1 < 001-lz4.patch || true
 curl -o 002-zstd.patch https://raw.githubusercontent.com/ferstar/kernel_manifest/realme/sm8650/patches/002-zstd.patch
 patch -p1 < 002-zstd.patch || true
 
+cd "$KERNEL_WORKSPACE" || exit 1
+
+# 检查KernelSU Makefile语法
+cd KernelSU || exit 1
+make -n -f kernel/Makefile || {
+    echo "KernelSU Makefile语法错误，尝试修复..."
+    # 备份原始文件
+    cp kernel/Makefile kernel/Makefile.bak
+    # 替换整个Makefile，以确保语法正确
+    cat > kernel/Makefile << 'EOF'
+obj-y += ksu.o
+DKSU_VERSION=10333
+KSU_GIT_VERSION := unknown
+
+ksu-y += apk_sign.o
+ksu-y += allowlist.o
+ksu-y += arch.o
+ksu-y += core.o
+ksu-y += events.o
+ksu-y += kernel_compat.o 
+ksu-y += module.o
+ksu-y += sucompat.o
+ksu-y += uid_observer.o
+ksu-y += manager.o
+ksu-y += selinux.o
+
+ifndef KSU_EXPECTED_SIZE
+KSU_EXPECTED_SIZE := 0x033b
+endif
+
+ifndef KSU_EXPECTED_HASH
+KSU_EXPECTED_HASH := 0xb0b91415
+endif
+
+ccflags-y += -DKSU_VERSION=$(DKSU_VERSION)
+ccflags-y += -DKSU_GIT_VERSION=\"$(KSU_GIT_VERSION)\"
+ccflags-y += -DKSU_EXPECTED_SIZE=$(KSU_EXPECTED_SIZE)
+ccflags-y += -DKSU_EXPECTED_HASH=$(KSU_EXPECTED_HASH)
+EOF
+}
 cd "$KERNEL_WORKSPACE" || exit 1
 
 # 修复 lz4 与 zstd 所导致的问题
@@ -138,7 +181,7 @@ echo "CONFIG_HAVE_KPROBES=y" >> "$KERNEL_WORKSPACE/common/arch/arm64/configs/gki
 echo "CONFIG_KPROBE_EVENTS=y" >> "$KERNEL_WORKSPACE/common/arch/arm64/configs/gki_defconfig"
 
 # 修改内核名称
-perl -pi -e 's{UTS_VERSION="\$\(echo \$UTS_VERSION \$CONFIG_FLAGS \$TIMESTAMP \| cut -b -\$UTS_LEN\)"}{UTS_VERSION="#1 SMP PREEMPT Fri May 31 13:26:56 UTC 2025 by dgscyg"}' ./common/scripts/mkcompile_h
+perl -pi -e 's{UTS_VERSION="\$\(echo \$UTS_VERSION \$CONFIG_FLAGS \$TIMESTAMP \| cut -b -\$UTS_LEN\)"}{UTS_VERSION="#1 SMP PREEMPT Fri May 31 14:58:10 UTC 2025 by dgscyg"}' ./common/scripts/mkcompile_h
 sed -i '$s|echo "\$res"|echo "\$res-MKSU"|' ./common/scripts/setlocalversion
 sed -i '/^[[:space:]]*"protected_exports_list"[[:space:]]*:[[:space:]]*"android\/abi_gki_protected_exports_aarch64",$/d' ./common/BUILD.bazel
 sed -i "/stable_scmversion_cmd/s/-maybe-dirty//g" ./build/kernel/kleaf/impl/stamp.bzl
